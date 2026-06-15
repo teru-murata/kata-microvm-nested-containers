@@ -1,0 +1,17 @@
+# Lima VM for reproducing Kata microVMs on Apple Silicon (M3+/macOS 15+).
+# vz + nestedVirtualization exposes /dev/kvm inside the guest, so Kata can run a
+# KVM-accelerated microVM. The extra raw disk is the devmapper thin-pool backing
+# store (a loopback pool deadlocks Cloud Hypervisor — use a real block device).
+vmType: "vz"
+nestedVirtualization: true
+cpus: 4
+memory: "8GiB"
+disk: "40GiB"
+additionalDisks:
+  - name: "katapool"
+    size: "50GiB"
+    format: false        # raw block device, not a formatted/mounted filesystem
+images:
+  - location: "https://cloud-images.ubuntu.com/releases/24.04/release/ubuntu-24.04-server-cloudimg-arm64.img"
+    arch: "aarch64"
+mounts: []

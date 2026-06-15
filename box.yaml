@@ -1,0 +1,59 @@
+# The "box": a NON-privileged pod that boots as a Kata microVM (kata-clh) and runs
+# a nested container inside itself. No `privileged: true` — that would make Kata
+# hot-plug host devices into the guest. Instead we grant only the capabilities the
+# in-guest engine needs; the microVM, not the container, is the trust boundary.
+#
+# The command does the in-box bootstrap (cgroup2 delegation by hand, since this
+# image has no systemd) and then `podman run` / `podman build` a nested container.
+# Output goes to the pod log: `kubectl logs box`.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: box
+spec:
+  restartPolicy: Never
+  runtimeClassName: kata-clh
+  containers:
+  - name: box
+    image: alpine:3.20
+    securityContext:
+      capabilities:
+        add: ["SYS_ADMIN","SYS_RESOURCE","NET_ADMIN","MKNOD","SETUID","SETGID","SYS_CHROOT","NET_RAW","SYS_PTRACE"]
+    resources:
+      limits:
+        cpu: "2"
+        memory: "2Gi"        # asking for limits makes k8s/Kata delegate the io+memory cgroup controllers
+    command: ["/bin/sh","-c"]
+    args:
+    - |
+      set -e
+      apk add --no-cache podman crun >/dev/null 2>&1
+
+      # cgroup2 delegation: a cgroup with member processes can't enable controllers,
+      # so evacuate every process to /init, delegate the controllers down, and hand
+      # containers a delegated /pod cgroup.
+      mount -o remount,rw /sys/fs/cgroup 2>/dev/null || true
+      mkdir -p /sys/fs/cgroup/init /sys/fs/cgroup/pod
+      for p in $(cat /sys/fs/cgroup/cgroup.procs); do echo $p > /sys/fs/cgroup/init/cgroup.procs 2>/dev/null || true; done
+      echo "+cpu +io +memory +pids" > /sys/fs/cgroup/cgroup.subtree_control 2>/dev/null || true
+      echo "DELEG=[$(cat /sys/fs/cgroup/cgroup.subtree_control)]"
+      mount -o remount,rw /proc/sys 2>/dev/null || true
+      echo 1 > /proc/sys/net/ipv4/ip_forward 2>/dev/null || true
+
+      # crun (not runc — runc fails cgroup2 init here), cgroupfs manager (no sd-bus),
+      # vfs (no /dev/fuse), network=none (no netavark sysctl writes).
+      P="podman --cgroup-manager=cgroupfs --storage-driver=vfs"
+
+      echo "=== podman run hello-world ==="
+      $P run --cgroup-parent=/pod --rm --network=none docker.io/library/hello-world 2>&1 \
+        | grep -iE "hello from docker|working correctly" && echo RUN_OK || { echo RUN_FAIL; $P run --cgroup-parent=/pod --rm --network=none docker.io/library/hello-world 2>&1 | tail -4; }
+
+      echo "=== podman build + run ==="
+      printf "FROM docker.io/library/alpine:3.20\nRUN echo BUILT_INSIDE_MICROVM>/proof\n" > /tmp/Dockerfile
+      # buildah RUN uses chroot isolation (no per-step cgroup) on the box's own netns,
+      # which sidesteps the cgroup-delegation + netavark issues for the build itself.
+      $P build --isolation=chroot --network=host -q -t proof /tmp >/dev/null 2>&1 \
+        && echo "BUILD_OK proof=[$($P run --cgroup-parent=/pod --rm --network=none proof cat /proof)]" || echo BUILD_FAIL
+
+      echo "=== DONE ==="
+      sleep 600
