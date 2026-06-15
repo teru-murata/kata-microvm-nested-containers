@@ -1,4 +1,4 @@
-# Nested containers in a non-privileged Kata microVM
+# 🍎 Nested containers in a non-privileged Kata microVM
 
 Run a container **inside a VM-isolated microVM**, with **`privileged: false`**, reproduced on an
 **Apple Silicon Mac** (M3+) using nested virtualization. `make up && make test` →
